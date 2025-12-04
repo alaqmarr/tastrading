@@ -1,0 +1,381 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output = "./app/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================================
+// SYSTEM CONFIGURATION (for inventory access verification)
+// ============================================================================
+
+model SystemConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("system_config")
+}
+
+// ============================================================================
+// AUTHENTICATION & USERS
+// ============================================================================
+
+enum UserRole {
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+model User {
+  id            String   @id @default(cuid())
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  password      String? // bcrypt hashed - nullable for OAuth users
+  role          UserRole @default(VIEWER)
+
+  // Better-Auth relations
+  sessions Session[]
+  accounts Account[]
+
+  // App relations
+  inventoryLogs        InventoryLog[]
+  variantInventoryLogs VariantInventoryLog[] // Variant inventory tracking
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+  @@map("users")
+}
+
+model Session {
+  id        String   @id
+  userId    String
+  expiresAt DateTime
+  token     String   @unique
+  ipAddress String?
+  userAgent String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Account {
+  id                    String    @id
+  userId                String
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("verification")
+}
+
+// ============================================================================
+// TASK QUEUE (for non-blocking mutations)
+// ============================================================================
+
+enum TaskStatus {
+  PENDING
+  PROCESSING
+  SUCCESS
+  FAILED
+}
+
+model Task {
+  id          String     @id @default(cuid())
+  type        String
+  payload     Json
+  status      TaskStatus @default(PENDING)
+  attempts    Int        @default(0)
+  errorLog    String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  completedAt DateTime?
+
+  @@index([status, createdAt])
+  @@index([type])
+  @@map("tasks")
+}
+
+// ============================================================================
+// WEBHOOKS (optional)
+// ============================================================================
+
+model WebhookConfig {
+  id        String   @id @default(cuid())
+  eventType String
+  url       String
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@index([eventType, active])
+  @@map("webhook_configs")
+}
+
+// ============================================================================
+// EXISTING SCHEMA - Your Business Models
+// ============================================================================
+
+model Brand {
+  id            String     @id
+  name          String     @unique
+  imageUrl      String?
+  imagePublicId String?
+  products      Product[]
+  categories    Category[]
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+}
+
+model Category {
+  id        String    @id
+  name      String    @unique
+  products  Product[]
+  purposes  Purpose[]
+  brands    Brand[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+model Purpose {
+  id         String     @id
+  name       String     @unique
+  products   Product[]
+  categories Category[]
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+}
+
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+}
+
+model Product {
+  id          String     @id // also acts as slug
+  name        String     @unique
+  description String?    @db.Text // Rich text content from Tiptap (stored as HTML)
+  price       Decimal    @default(0)
+  category    Category?  @relation(fields: [categoryId], references: [id])
+  categoryId  String?
+  brand       Brand?     @relation(fields: [brandId], references: [id])
+  brandId     String?
+  purpose     Purpose?   @relation(fields: [purposeId], references: [id])
+  purposeId   String?
+  images      Image[]
+  inventory   Inventory?
+  variants    ProductVariant[] // Product variants relation
+  hasVariants Boolean    @default(false) // Flag to indicate if product uses variants
+  status      String     @default("DRAFT") // DRAFT, PUBLISHED, ARCHIVED
+  isArchived  Boolean    @default(false)
+  priority    Int        @default(0)
+  version     Int        @default(1)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([categoryId])
+  @@index([brandId])
+  @@index([purposeId])
+  @@index([status])
+}
+
+model Image {
+  id        String   @id @default(cuid())
+  url       String
+  publicId  String
+  product   Product? @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId String?
+  createdAt DateTime @default(now())
+
+  @@index([productId])
+}
+
+model Activity {
+  id          String   @id @default(cuid())
+  type        String // create, update, delete
+  entity      String // product, brand, category, purpose
+  status      String // success, processing, error
+  description String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([entity, createdAt])
+  @@index([status])
+}
+
+model Inventory {
+  id            String         @id @default(cuid())
+  productId     String         @unique
+  product       Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  stock         Int            @default(0)
+  reservedStock Int            @default(0)
+  logs          InventoryLog[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([productId])
+}
+
+model InventoryLog {
+  id          String    @id @default(cuid())
+  inventoryId String
+  inventory   Inventory @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  delta       Int
+  reason      String
+  createdAt   DateTime  @default(now())
+
+  @@index([inventoryId])
+  @@index([userId])
+}
+
+// ============================================================================
+// PRODUCT VARIANTS SYSTEM
+// ============================================================================
+
+// Variant Option Types (e.g., "Size", "Color", "Material")
+model VariantOption {
+  id          String         @id @default(cuid())
+  name        String         @unique // "size", "color", "material"
+  displayName String         // "Product Size", "Color", "Material"
+  position    Int            @default(0) // Display order
+  values      VariantValue[]
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([position])
+}
+
+// Variant Option Values (e.g., "Small", "Red", "Cotton")
+model VariantValue {
+  id        String           @id @default(cuid())
+  optionId  String
+  option    VariantOption    @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  value     String           // "Small", "Red", "Cotton"
+  position  Int              @default(0)
+  variants  ProductVariant[] @relation("VariantValues")
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@unique([optionId, value])
+  @@index([optionId])
+}
+
+// Product Variants (e.g., "Red + Small" combination)
+model ProductVariant {
+  id          String                @id @default(cuid())
+  productId   String
+  product     Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+  
+  // Variant-specific fields
+  sku         String                @unique
+  price       Decimal?              // If null, uses base product price
+  
+  // Per-Variant Inventory Management
+  stock           Int               @default(0)
+  reservedStock   Int               @default(0) // Stock reserved for orders
+  lowStockAlert   Int?              // Alert threshold
+  inventoryLogs   VariantInventoryLog[]
+  
+  // Option values (many-to-many relationship)
+  optionValues VariantValue[]       @relation("VariantValues")
+  
+  // Variant-specific images
+  images      VariantImage[]
+  
+  isActive    Boolean               @default(true)
+  priority    Int                   @default(0)
+  
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  @@index([productId])
+  @@index([sku])
+  @@index([stock]) // For low stock filtering
+}
+
+// Per-Variant Inventory Tracking
+model VariantInventoryLog {
+  id        String         @id @default(cuid())
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User           @relation(fields: [userId], references: [id])
+  delta     Int            // +100 (restock), -5 (sale)
+  reason    String         // "Purchase", "Return", "Adjustment", "Damaged"
+  note      String?        // Optional notes
+  createdAt DateTime       @default(now())
+
+  @@index([variantId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// Variant-specific Images
+model VariantImage {
+  id        String         @id @default(cuid())
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  url       String
+  publicId  String
+  position  Int            @default(0)
+  createdAt DateTime       @default(now())
+
+  @@index([variantId])
+  @@index([position])
+}
+
+// ============================================================================
+// CONTACT MESSAGES
+// ============================================================================
+
+model ContactMessage {
+  id        String   @id @default(cuid())
+  name      String
+  email     String
+  phone     String?
+  message   String
+  createdAt DateTime @default(now())
+
+  @@map("contact_messages")
+}
