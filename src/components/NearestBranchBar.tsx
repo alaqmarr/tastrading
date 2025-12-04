@@ -3,44 +3,107 @@
 import { useEffect, useState } from "react";
 import { offices, findNearestOffice, calculateDistance, getWhatsAppLink, type Office } from "@/lib/offices";
 
+type LocationStatus = "loading" | "granted" | "denied" | "prompt" | "unavailable";
+
 export default function NearestBranchBar() {
     const [nearestOffice, setNearestOffice] = useState<Office | null>(null);
     const [distance, setDistance] = useState<number | null>(null);
-    const [isVisible, setIsVisible] = useState(false);
+    const [locationStatus, setLocationStatus] = useState<LocationStatus>("loading");
+    const [isDismissed, setIsDismissed] = useState(false);
 
     useEffect(() => {
-        if ("geolocation" in navigator) {
-            navigator.geolocation.getCurrentPosition(
-                (position) => {
-                    const { latitude, longitude } = position.coords;
-                    const nearest = findNearestOffice(latitude, longitude);
-                    if (nearest) {
-                        setNearestOffice(nearest);
-                        setDistance(
-                            calculateDistance(
-                                latitude,
-                                longitude,
-                                nearest.coordinates.lat,
-                                nearest.coordinates.lng
-                            )
-                        );
-                        setIsVisible(true);
-                    }
-                },
-                () => {
-                    // Silently fail - show default contact instead
-                    setNearestOffice(offices[0]); // Default to head office
-                    setIsVisible(true);
-                }
-            );
-        } else {
-            // No geolocation - show default
+        // Check if already dismissed in this session
+        const dismissed = sessionStorage.getItem("locationBannerDismissed");
+        if (dismissed) {
+            setIsDismissed(true);
+        }
+
+        // Check if geolocation is available
+        if (!("geolocation" in navigator)) {
+            setLocationStatus("unavailable");
             setNearestOffice(offices[0]);
-            setIsVisible(true);
+            return;
+        }
+
+        // Check permission status if available
+        if ("permissions" in navigator) {
+            navigator.permissions.query({ name: "geolocation" }).then((result) => {
+                if (result.state === "granted") {
+                    requestLocation();
+                } else if (result.state === "denied") {
+                    setLocationStatus("denied");
+                    setNearestOffice(offices[0]);
+                } else {
+                    setLocationStatus("prompt");
+                    // Show prompt banner, don't request yet
+                }
+
+                // Listen for permission changes
+                result.onchange = () => {
+                    if (result.state === "granted") {
+                        requestLocation();
+                    } else if (result.state === "denied") {
+                        setLocationStatus("denied");
+                        setNearestOffice(offices[0]);
+                    }
+                };
+            }).catch(() => {
+                // Fallback if permissions API fails
+                requestLocation();
+            });
+        } else {
+            // No permissions API, try to request location
+            requestLocation();
         }
     }, []);
 
-    // Get the primary contact (first one listed)
+    const requestLocation = () => {
+        setLocationStatus("loading");
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const { latitude, longitude } = position.coords;
+                const nearest = findNearestOffice(latitude, longitude);
+                if (nearest) {
+                    setNearestOffice(nearest);
+                    setDistance(
+                        calculateDistance(
+                            latitude,
+                            longitude,
+                            nearest.coordinates.lat,
+                            nearest.coordinates.lng
+                        )
+                    );
+                    setLocationStatus("granted");
+                }
+            },
+            (error) => {
+                console.log("Geolocation error:", error.code, error.message);
+                if (error.code === 1) {
+                    // Permission denied
+                    setLocationStatus("denied");
+                } else {
+                    // Position unavailable or timeout
+                    setLocationStatus("unavailable");
+                }
+                setNearestOffice(offices[0]);
+            },
+            {
+                enableHighAccuracy: false,
+                timeout: 10000,
+                maximumAge: 300000, // Cache for 5 minutes
+            }
+        );
+    };
+
+    const handleEnableLocation = () => {
+        requestLocation();
+    };
+
+    const handleDismiss = () => {
+        setIsDismissed(true);
+        sessionStorage.setItem("locationBannerDismissed", "true");
+    };
+
     const contact = nearestOffice?.contacts[0];
 
     const formatDistance = (km: number) => {
@@ -48,7 +111,93 @@ export default function NearestBranchBar() {
         return `${km.toFixed(1)}km away`;
     };
 
-    if (!isVisible || !nearestOffice || !contact) return null;
+    // Don't show anything while loading
+    if (locationStatus === "loading") {
+        return (
+            <div className="bg-gray-900 text-white py-2 px-4">
+                <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-sm">
+                    <div className="w-4 h-4 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+                    <span className="text-gray-400">Finding nearest branch...</span>
+                </div>
+            </div>
+        );
+    }
+
+    // Show prompt banner if location not yet requested
+    if (locationStatus === "prompt" && !isDismissed) {
+        return (
+            <div className="bg-gradient-to-r from-emerald-600 to-emerald-700 text-white py-2.5 px-4">
+                <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-sm">
+                    <div className="flex items-center gap-2">
+                        <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                        </svg>
+                        <span>Enable location to find your nearest branch</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={handleEnableLocation}
+                            className="px-3 py-1 bg-white text-emerald-700 rounded-full text-xs font-semibold hover:bg-emerald-50 transition-colors"
+                        >
+                            Enable Location
+                        </button>
+                        <button
+                            onClick={handleDismiss}
+                            className="p-1 hover:bg-white/20 rounded-full transition-colors"
+                            aria-label="Dismiss"
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    // Show denied banner with fallback
+    if (locationStatus === "denied" && !isDismissed) {
+        return (
+            <div className="bg-gray-900 text-white py-2 px-4">
+                <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-sm">
+                    <div className="flex items-center gap-2">
+                        <svg className="w-4 h-4 text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                        <span className="text-gray-300">Location access denied.</span>
+                    </div>
+                    {contact && (
+                        <>
+                            <span className="text-gray-600 hidden sm:inline">|</span>
+                            <div className="flex items-center gap-2">
+                                <span className="text-gray-400">Contact our head office:</span>
+                                <a
+                                    href={`tel:${contact.phone}`}
+                                    className="font-medium text-emerald-400 hover:text-emerald-300 transition-colors"
+                                >
+                                    {contact.phone}
+                                </a>
+                            </div>
+                        </>
+                    )}
+                    <button
+                        onClick={handleDismiss}
+                        className="p-1 hover:bg-white/10 rounded-full transition-colors ml-2"
+                        aria-label="Dismiss"
+                    >
+                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    // Normal display with branch info (granted or unavailable with fallback)
+    if (!nearestOffice || !contact) return null;
 
     return (
         <div className="bg-gray-900 text-white py-2 px-4">
@@ -60,8 +209,11 @@ export default function NearestBranchBar() {
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
                     </svg>
                     <span className="font-medium">{nearestOffice.name}</span>
-                    {distance && (
+                    {distance && locationStatus === "granted" && (
                         <span className="text-gray-400 text-xs">({formatDistance(distance)})</span>
+                    )}
+                    {locationStatus !== "granted" && (
+                        <span className="text-gray-500 text-xs">(Head Office)</span>
                     )}
                 </div>
 
